@@ -182,9 +182,10 @@ async function composeAsync(...funcs) {
     return composedFunc;
 }
 
-async function beginWork(workflow) {
+async function beginWork(workflow, type = 'merge') {
+    let folders;
     const ind = index();
-    const folders = await getFolders();
+    folders = type === 'merge' ? await getFolders() : type;
 
     // 控制并发数量
     const chunkSize =
@@ -197,13 +198,20 @@ async function beginWork(workflow) {
     for (let i = 0; i < folders.length; i += chunkSize) {
         chunks.push(folders.slice(i, i + chunkSize));
     }
+
     for await (const chunk of chunks) {
         console.log('------------');
+        console.log(chunk);
         const promises = [];
         for await (const folder of chunk) {
             console.log('--#', ind.value(), 'on processing: ', folder);
             const composedFun = await composeAsync(...workflow);
-            const res = await composedFun(folder);
+            let res;
+            if (type === 'merge') {
+                res = await composedFun(folder);
+            } else {
+                res = composedFun(folder);
+            }
             if (res instanceof Array) {
                 res.forEach((el) => promises.push(el));
             } else {
@@ -211,17 +219,75 @@ async function beginWork(workflow) {
             }
             ind.inc();
         }
+        console.log(promises);
         await Promise.allSettled(promises);
         console.log('------------');
     }
 }
 
-async function a() {
-    console.log('-------work starting--------');
-    await beginWork([correctFile]);
-    console.log('-------starting merge-------');
-    await beginWork([prepareMerge, mergeFile]);
-    console.log('-------work finished-------');
+// a();
+
+async function prepareConvert() {
+    let videos = [];
+    const files = await readDir(`${filepath}`);
+    files.forEach((file) => {
+        if (file.includes('.mp4')) {
+            const fpath = path.join(`${filepath}`, file);
+            const fileName = file.split('.').slice(0, -1).join('.');
+            videos.push({ fileName, fpath });
+        }
+    });
+    console.log(videos);
+    return videos;
 }
 
-a();
+async function convert({ fileName, fpath }) {
+    const audioCodec = CONFIG.audioCodec || 'libmp3lame';
+    const videoCodec = CONFIG.videCodec || 'libx264';
+
+    const ffmpegPath =
+        CONFIG.ffmpegPath.at(-1) === '/'
+            ? CONFIG.ffmpegPath.slice(0, -1)
+            : CONFIG.ffmpegPath;
+    const outputPath =
+        CONFIG.outputFolder.at(-1) === '/'
+            ? CONFIG.outputFolder.slice(0, -1)
+            : CONFIG.outputFolder;
+
+    return new Promise((resolve, reject) => {
+        const process = ffmpeg()
+            .setFfmpegPath(ffmpegPath)
+            .input(fpath)
+            .audioCodec(audioCodec)
+            .videoCodec(videoCodec)
+            .on('error', function (err) {
+                console.log('An error occurred: ' + err.message);
+                console.log(err);
+                reject();
+            });
+        setTimeout(() => {
+            process
+                .output(`${outputPath}/${fileName}.mp4`)
+                .on('end', () => {
+                    console.log('Conversion finished', fileName);
+                    resolve();
+                })
+                .run();
+        }, 100);
+    });
+}
+
+async function b() {
+    const workType = CONFIG.workType;
+    console.log('-------work starting--------');
+    if (workType === 'convert') {
+        const videos = await prepareConvert();
+        await beginWork([convert], videos);
+    } else {
+        await beginWork([correctFile]);
+        console.log('-------starting merge-------');
+        await beginWork([prepareMerge, mergeFile]);
+    }
+    console.log('-------work finished-------');
+}
+b();
